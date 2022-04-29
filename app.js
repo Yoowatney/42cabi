@@ -20,8 +20,9 @@ function sendResponse(res, data, status, code) {
   });
 }
 
-async function getLentUser(res) {
+async function getLentUserInfo(res) {
   try {
+    // TODO DB error가 주요 에러인데, 이 함수를 wrap함수로 묶어서 에러처리를 한번에 해야할지..
     let connection;
     let lentInfo = [];
 
@@ -84,7 +85,7 @@ app.get("/api/cabinet", (_req, res) => {
 });
 
 app.get("/api/lent_info", async (req, res) => {
-  const lentInfo = await getLentUser(res);
+  const lentInfo = await getLentUserInfo(res);
   return sendResponse(res, lentInfo, 200, "ok");
   // return res.json(lentInfo);
   // return sendResponse(res, getLentUser(res), 200, "ok");
