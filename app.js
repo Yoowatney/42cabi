@@ -25,13 +25,13 @@ function sendResponse(res, data, status, code) {
   });
 }
 
-// 전체 사물함 정보
-async function getCabinetInfo() {
+// 전체 사물함 정보 가져옴
+async function getCabinets() {
   let connection;
   try {
     connection = await pool.getConnection();
 
-    const content1 = `SELECT DISTINCT cabinet.location from cabinet`;
+    const content1 = `SELECT DISTINCT cabinet.location FROM cabinet`;
     const result1 = await connection.query(content1);
     result1.forEach(async (element1) => {
       let floorList = [];
@@ -112,19 +112,22 @@ async function getLentUserInfo() {
   }
 }
 
-// 특정 사용자가 현재 대여하고 있는 사물함 + 유저 + 렌트 정보
-async function getUserCabinetInfo(cabinetIdx) {
+// 특정 사물함 + (user + lent) 정보 가져옴
+async function getCabinet(cabinetIdx) {
   let connection;
   try {
     connection = await pool.getConnection();
 
-    const content = `SELECT * FROM lent l JOIN user u ON l.lent_user_id=u.user_id JOIN cabinet c ON c.cabinet_id=l.lent_cabinet_id WHERE c.cabinet_id=${cabinetIdx}`;
-    const [userCabinetInfo] = await connection.query(content);
-
-    // console.log("===========USERCABINETINFO============");
-    // console.log(userCabinetInfo);
-    connection.release();
-    return { userCabinetInfo: userCabinetInfo };
+    const [result] = await connection.query(
+      `
+      SELECT *
+      FROM cabinet c
+      LEFT JOIN lent l ON c.cabinet_id=l.lent_cabinet_id
+      LEFT JOIN user u ON l.lent_user_id=u.user_id 
+      WHERE c.cabinet_id=${cabinetIdx}
+      `
+    );
+    return result;
   } catch (err) {
     console.log(err);
     throw err;
@@ -133,33 +136,37 @@ async function getUserCabinetInfo(cabinetIdx) {
   }
 }
 
-// 특정 사용자의 사물함 반납 처리
-async function postReturnCabinet(userIdx) {
-  let connection;
-  try {
-    connection = await pool.getConnection();
-    const content = `SELECT lent_cabinet_id, lent_user_id, DATE_FORMAT(lent_time, '%Y-%m-%d %H:%i:%s') AS lent_time FROM lent WHERE lent_user_id=${userIdx}`;
-    const [userLentInfo] = await connection.query(content);
+// 반납할 사물함의 lent 정보 가져옴
+async function getUserLent(connection, cabinetIdx) {
+  const [result] = await connection.query(
+    `
+    SELECT lent_cabinet_id, lent_user_id, DATE_FORMAT(lent_time, '%Y-%m-%d %H:%i:%s') AS lent_time
+    FROM lent
+    WHERE lent_cabinet_id = ${cabinetIdx}
+    `
+  );
+  return result;
+}
 
-    if (!userLentInfo) {
-      return;
-    }
-    // lent_log 테이블에 값 입력
-    connection.query(
-      `INSERT INTO lent_log(log_cabinet_id, log_user_id, lent_time, return_time) VALUES (${userLentInfo.lent_cabinet_id}, ${userLentInfo.lent_user_id}, '${userLentInfo.lent_time}', now())`
-    );
-    // lent 테이블에서 값 삭제
-    connection.query(
-      `DELETE FROM lent WHERE lent_cabinet_id=${userLentInfo.lent_cabinet_id}`
-    );
-    return "success"; // 어떤식으로 리턴해야할지 모르겠음
-    // TODO : 슬랙봇 메시지 발송
-  } catch (err) {
-    console.log(err);
-    throw err;
-  } finally {
-    connection.release();
-  }
+// lent 테이블에서 사물함 정보 삭제
+async function deleteLent(connection, userLentInfo) {
+  await connection.query(
+    `
+    DELETE 
+    FROM lent 
+    WHERE lent_cabinet_id=${userLentInfo.lent_cabinet_id}
+    `
+  );
+}
+
+// lent_log에 반납되는 사물함 정보 추가
+async function addLentLog(connection, userLentInfo) {
+  await connection.query(
+    `
+    INSERT INTO lent_log(log_cabinet_id, log_user_id, lent_time, return_time) 
+    VALUES (${userLentInfo.lent_cabinet_id}, ${userLentInfo.lent_user_id}, '${userLentInfo.lent_time}', now())
+    `
+  );
 }
 // await pool
 //   .query(content)
@@ -184,7 +191,7 @@ async function postReturnCabinet(userIdx) {
 // return { lentInfo: lentInfo };
 
 // 전체 사물함 정보
-getCabinetInfo();
+getCabinets();
 
 app.get("/api/cabinet", (_req, res) => {
   if (!cabinetList) {
@@ -211,31 +218,44 @@ app.get("/api/lent_info", async (_req, res) => {
 //   return res.send("listen on 3000!");
 // });
 
-// 특정 사용자가 현재 대여하고 있는 사물함 + 유저 + 렌트 정보
+// 특정 사물함의 정보 ( 대여중이라면: + 유저 + 렌트 정보) 가져옴
 app.get("/api/return_info", async (req, res) => {
   const { cabinetIdx } = req.query;
   if (!cabinetIdx) {
     return sendResponse(res, {}, 400, "req.query error");
   }
 
-  const result = await getUserCabinetInfo(cabinetIdx);
-  if (!result.userCabinetInfo) {
+  const cabinetInfo = await getCabinet(cabinetIdx);
+  if (!cabinetInfo) {
     return sendResponse(res, {}, 400, "error");
   }
-  return sendResponse(res, result, 200, "ok");
+  return sendResponse(res, cabinetInfo, 200, "ok");
 });
 
-app.post("/api/return", async (req, res) => {
-  const { userIdx } = req.query;
-  if (!userIdx) {
-    return sendResponse(res, {}, 400, "req.query error");
-  }
+// 특정 유저의 사물함 반납
+app.patch("/api/return", async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const { cabinetIdx } = req.query;
+    if (!cabinetIdx) {
+      return sendResponse(res, {}, 400, "req.query error");
+    }
 
-  const result = await postReturnCabinet(userIdx);
-  if (!result) {
-    return sendResponse(res, {}, 400, "error");
+    // 해당 사물함의 user, lent 정보 가져옴
+    const userLentInfo = await getUserLent(connection, cabinetIdx);
+    if (!userLentInfo) {
+      return sendResponse(res, {}, 400, "getUserLent error");
+    }
+    await deleteLent(connection, userLentInfo); // lent 테이블에서 반납 사물함 삭제
+    await addLentLog(connection, userLentInfo); // lent_log 테이블에 반납 사물함 추가
+
+    // TODO : 슬랙메시지 발송
+    return sendResponse(res, "return", 200, "ok");
+  } catch (err) {
+  } finally {
+    connection.release();
   }
-  return sendResponse(res, "return", 200, "ok");
 });
 
 app.listen(3000, () => {
