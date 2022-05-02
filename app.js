@@ -27,8 +27,9 @@ function sendResponse(res, data, status, code) {
 
 // 전체 사물함 정보
 async function getCabinetInfo() {
+  let connection;
   try {
-    const connection = await pool.getConnection();
+    connection = await pool.getConnection();
 
     const content1 = `SELECT DISTINCT cabinet.location from cabinet`;
     const result1 = await connection.query(content1);
@@ -68,17 +69,18 @@ async function getCabinetInfo() {
       cabinetList.section?.push(tmpSectionlist);
       cabinetList.cabinet?.push(tmpCabinetList);
     });
-    connection.release();
   } catch (err) {
     console.log(err);
     throw err;
+  } finally {
+    connection.release();
   }
 }
 
-async function getLentUserInfo(res) {
+async function getLentUserInfo() {
+  let connection;
   try {
     // TODO DB error가 주요 에러인데, 이 함수를 wrap함수로 묶어서 에러처리를 한번에 해야할지..
-    let connection;
     let lentInfo = [];
 
     const content =
@@ -99,20 +101,21 @@ async function getLentUserInfo(res) {
       });
     }
     // pool.end();
-    connection.release();
-    console.log(lentInfo);
+    // console.log(lentInfo);
     return { lentInfo: lentInfo };
   } catch (err) {
     console.log(err);
     throw err;
-    return sendResponse(res, {}, 400, "error");
+    // return sendResponse(res, {}, 400, "error");
+  } finally {
+    connection.release();
   }
 }
 
 // 특정 사용자가 현재 대여하고 있는 사물함 + 유저 + 렌트 정보
 async function getUserCabinetInfo(cabinetIdx) {
+  let connection;
   try {
-    let connection;
     connection = await pool.getConnection();
 
     const content = `SELECT * FROM lent l JOIN user u ON l.lent_user_id=u.user_id JOIN cabinet c ON c.cabinet_id=l.lent_cabinet_id WHERE c.cabinet_id=${cabinetIdx}`;
@@ -125,6 +128,37 @@ async function getUserCabinetInfo(cabinetIdx) {
   } catch (err) {
     console.log(err);
     throw err;
+  } finally {
+    connection.release();
+  }
+}
+
+// 특정 사용자의 사물함 반납 처리
+async function postReturnCabinet(userIdx) {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const content = `SELECT lent_cabinet_id, lent_user_id, DATE_FORMAT(lent_time, '%Y-%m-%d %H:%i:%s') AS lent_time FROM lent WHERE lent_user_id=${userIdx}`;
+    const [userLentInfo] = await connection.query(content);
+
+    if (!userLentInfo) {
+      return;
+    }
+    // lent_log 테이블에 값 입력
+    connection.query(
+      `INSERT INTO lent_log(log_cabinet_id, log_user_id, lent_time, return_time) VALUES (${userLentInfo.lent_cabinet_id}, ${userLentInfo.lent_user_id}, '${userLentInfo.lent_time}', now())`
+    );
+    // lent 테이블에서 값 삭제
+    connection.query(
+      `DELETE FROM lent WHERE lent_cabinet_id=${userLentInfo.lent_cabinet_id}`
+    );
+    return "success"; // 어떤식으로 리턴해야할지 모르겠음
+    // TODO : 슬랙봇 메시지 발송
+  } catch (err) {
+    console.log(err);
+    throw err;
+  } finally {
+    connection.release();
   }
 }
 // await pool
@@ -162,8 +196,8 @@ app.get("/api/cabinet", (_req, res) => {
   }
 });
 
-app.get("/api/lent_info", async (req, res) => {
-  const lentInfo = await getLentUserInfo(res);
+app.get("/api/lent_info", async (_req, res) => {
+  const lentInfo = await getLentUserInfo();
   return sendResponse(res, lentInfo, 200, "ok");
   // return res.json(lentInfo);
   // return sendResponse(res, getLentUser(res), 200, "ok");
@@ -183,14 +217,25 @@ app.get("/api/return_info", async (req, res) => {
   if (!cabinetIdx) {
     return sendResponse(res, {}, 400, "req.query error");
   }
-  const result = await getUserCabinetInfo(cabinetIdx);
 
-  // console.log("========RESULT=========");
-  // console.log(result);
+  const result = await getUserCabinetInfo(cabinetIdx);
   if (!result.userCabinetInfo) {
     return sendResponse(res, {}, 400, "error");
   }
   return sendResponse(res, result, 200, "ok");
+});
+
+app.post("/api/return", async (req, res) => {
+  const { userIdx } = req.query;
+  if (!userIdx) {
+    return sendResponse(res, {}, 400, "req.query error");
+  }
+
+  const result = await postReturnCabinet(userIdx);
+  if (!result) {
+    return sendResponse(res, {}, 400, "error");
+  }
+  return sendResponse(res, "return", 200, "ok");
 });
 
 app.listen(3000, () => {
